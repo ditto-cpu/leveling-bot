@@ -11,7 +11,7 @@ const voiceSessions = new Map(); // oderId viserId -> join timestamp
 // Config
 const ACTIVITIES = ['meditation', 'work', 'reading', 'writing', 'workout'];
 const TRACKED_VOICE_CHANNEL_IDS = ['1460373491776749708', '1462082630353944720'];
-const XP_ANNOUNCEMENT_CHANNEL = 'testing-xp';
+const XP_ANNOUNCEMENT_CHANNEL_ID = '1462682137680412672';
 
 function loadData() {
   try {
@@ -163,9 +163,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
         const { level, currentXp, nextLevelXp } = getLevel(totalXp);
         
         // Announce in channel
-        const announcementChannel = newState.guild.channels.cache.find(
-          ch => ch.name === XP_ANNOUNCEMENT_CHANNEL
-        );
+        const announcementChannel = newState.guild.channels.cache.get(XP_ANNOUNCEMENT_CHANNEL_ID);
         
         if (announcementChannel) {
           await announcementChannel.send(
