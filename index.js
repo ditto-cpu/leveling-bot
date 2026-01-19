@@ -10,7 +10,7 @@ const voiceSessions = new Map(); // oderId viserId -> join timestamp
 
 // Config
 const ACTIVITIES = ['meditation', 'work', 'reading', 'writing', 'workout'];
-const TRACKED_VOICE_CHANNELS = ['Co-Working', 'Quiet Focus'];
+const TRACKED_VOICE_CHANNEL_IDS = ['1460373491776749708', '1462082630353944720'];
 const XP_ANNOUNCEMENT_CHANNEL = 'testing-xp';
 
 function loadData() {
@@ -129,8 +129,8 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   const oldChannel = oldState.channel;
   const newChannel = newState.channel;
   
-  const wasInTracked = oldChannel && TRACKED_VOICE_CHANNELS.includes(oldChannel.name);
-  const isInTracked = newChannel && TRACKED_VOICE_CHANNELS.includes(newChannel.name);
+  const wasInTracked = oldChannel && TRACKED_VOICE_CHANNEL_IDS.includes(oldChannel.id);
+  const isInTracked = newChannel && TRACKED_VOICE_CHANNEL_IDS.includes(newChannel.id);
   
   // Joined a tracked channel
   if (!wasInTracked && isInTracked) {
