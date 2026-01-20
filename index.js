@@ -6,10 +6,9 @@ const path = require('path');
 const DATA_FILE = path.join(__dirname, 'data.json');
 
 // Voice channel tracking
-const voiceSessions = new Map(); // oderId viserId -> join timestamp
+const voiceSessions = new Map();
 
 // Config
-const ACTIVITIES = ['meditation', 'work', 'reading', 'writing', 'workout'];
 const TRACKED_VOICE_CHANNEL_IDS = ['1460373491776749708', '1462082630353944720'];
 const XP_ANNOUNCEMENT_CHANNEL_ID = '1462682137680412672';
 
@@ -40,7 +39,7 @@ function getLevel(xp) {
     required = (level + 1) * 100;
   }
   
-  return { level, currentXp: remaining, nextLevelXp: required };
+  return { level, currentXp: Math.floor(remaining), nextLevelXp: required };
 }
 
 function getKey(userId, guildId) {
@@ -50,15 +49,23 @@ function getKey(userId, guildId) {
 function getUserData(data, userId, guildId) {
   const key = getKey(userId, guildId);
   if (!data[key]) {
-    data[key] = {};
-    ACTIVITIES.forEach(a => data[key][a] = 0);
+    data[key] = {
+      // Main stats
+      soma: 0,
+      knowledge: 0,
+      perception: 0,
+      work: 0,
+      // Soma branches only
+      agility: 0,
+      strength: 0
+    };
   }
   return data[key];
 }
 
 function getTotalXp(data, userId, guildId) {
   const userData = getUserData(data, userId, guildId);
-  return Object.values(userData).reduce((sum, xp) => sum + xp, 0);
+  return userData.soma + userData.knowledge + userData.perception + userData.work;
 }
 
 async function updateNickname(member, data) {
@@ -98,11 +105,14 @@ client.once('ready', async () => {
     new SlashCommandBuilder()
       .setName('log')
       .setDescription('Log your activities (in minutes)')
-      .addIntegerOption(opt => opt.setName('meditation').setDescription('Minutes of meditation'))
-      .addIntegerOption(opt => opt.setName('work').setDescription('Minutes of work'))
-      .addIntegerOption(opt => opt.setName('reading').setDescription('Minutes of reading'))
-      .addIntegerOption(opt => opt.setName('writing').setDescription('Minutes of writing'))
-      .addIntegerOption(opt => opt.setName('workout').setDescription('Minutes of workout')),
+      .addIntegerOption(opt => opt.setName('agility').setDescription('Yoga, stretching, running, cardio (1x Soma)'))
+      .addIntegerOption(opt => opt.setName('strength').setDescription('Lifting, calisthenics (1x Soma)'))
+      .addIntegerOption(opt => opt.setName('video').setDescription('Video/audiobooks (0.7x Knowledge)'))
+      .addIntegerOption(opt => opt.setName('reading').setDescription('Reading (1x Knowledge)'))
+      .addIntegerOption(opt => opt.setName('writing').setDescription('Writing (1.2x Knowledge)'))
+      .addIntegerOption(opt => opt.setName('meditation').setDescription('Meditation (1x Perception)'))
+      .addIntegerOption(opt => opt.setName('background_med').setDescription('Background meditation (0.2x Perception)'))
+      .addIntegerOption(opt => opt.setName('work').setDescription('Work (1x Work)')),
     
     new SlashCommandBuilder()
       .setName('stats')
@@ -167,7 +177,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
         
         if (announcementChannel) {
           await announcementChannel.send(
-            `**${newState.member.user.username}** earned **${minutes} work XP** from ${oldChannel.name}!\nTotal Level ${level} (${currentXp}/${nextLevelXp} XP)`
+            `**${newState.member.user.username}** earned **${minutes} Work XP** from ${oldChannel.name}!\nTotal Level ${level} (${currentXp}/${nextLevelXp} XP)`
           );
         }
         
@@ -186,12 +196,61 @@ client.on('interactionCreate', async interaction => {
     const logged = [];
     const userData = getUserData(data, interaction.user.id, interaction.guildId);
     
-    for (const activity of ACTIVITIES) {
-      const minutes = interaction.options.getInteger(activity);
-      if (minutes && minutes > 0) {
-        userData[activity] += minutes;
-        logged.push(`${activity}: ${minutes} min`);
-      }
+    // Soma branches
+    const agility = interaction.options.getInteger('agility');
+    if (agility && agility > 0) {
+      userData.agility += agility;
+      userData.soma += agility;
+      logged.push(`Agility: ${agility} min → +${agility} XP (Soma & Agility)`);
+    }
+    
+    const strength = interaction.options.getInteger('strength');
+    if (strength && strength > 0) {
+      userData.strength += strength;
+      userData.soma += strength;
+      logged.push(`Strength: ${strength} min → +${strength} XP (Soma & Strength)`);
+    }
+    
+    // Knowledge
+    const video = interaction.options.getInteger('video');
+    if (video && video > 0) {
+      const xp = Math.floor(video * 0.7);
+      userData.knowledge += xp;
+      logged.push(`Video: ${video} min x0.7 → +${xp} XP (Knowledge)`);
+    }
+    
+    const reading = interaction.options.getInteger('reading');
+    if (reading && reading > 0) {
+      userData.knowledge += reading;
+      logged.push(`Reading: ${reading} min → +${reading} XP (Knowledge)`);
+    }
+    
+    const writing = interaction.options.getInteger('writing');
+    if (writing && writing > 0) {
+      const xp = Math.floor(writing * 1.2);
+      userData.knowledge += xp;
+      logged.push(`Writing: ${writing} min x1.2 → +${xp} XP (Knowledge)`);
+    }
+    
+    // Perception
+    const meditation = interaction.options.getInteger('meditation');
+    if (meditation && meditation > 0) {
+      userData.perception += meditation;
+      logged.push(`Meditation: ${meditation} min → +${meditation} XP (Perception)`);
+    }
+    
+    const bgMed = interaction.options.getInteger('background_med');
+    if (bgMed && bgMed > 0) {
+      const xp = Math.floor(bgMed * 0.2);
+      userData.perception += xp;
+      logged.push(`Background Med: ${bgMed} min x0.2 → +${xp} XP (Perception)`);
+    }
+    
+    // Work
+    const work = interaction.options.getInteger('work');
+    if (work && work > 0) {
+      userData.work += work;
+      logged.push(`Work: ${work} min → +${work} XP (Work)`);
     }
     
     if (logged.length === 0) {
@@ -221,11 +280,25 @@ client.on('interactionCreate', async interaction => {
     let statsText = `**${targetUser.username}'s Stats**\n\n`;
     statsText += `**Total Level ${totalLevel.level}** (${totalLevel.currentXp}/${totalLevel.nextLevelXp} XP)\n\n`;
     
-    for (const activity of ACTIVITIES) {
-      const xp = userData[activity] || 0;
-      const { level, currentXp, nextLevelXp } = getLevel(xp);
-      statsText += `${activity}: Level ${level} (${currentXp}/${nextLevelXp})\n`;
-    }
+    // Soma with branches
+    const somaLevel = getLevel(userData.soma);
+    const agilityLevel = getLevel(userData.agility);
+    const strengthLevel = getLevel(userData.strength);
+    statsText += `**Soma** - Level ${somaLevel.level} (${somaLevel.currentXp}/${somaLevel.nextLevelXp})\n`;
+    statsText += `  Agility: Lvl ${agilityLevel.level} (${agilityLevel.currentXp}/${agilityLevel.nextLevelXp})\n`;
+    statsText += `  Strength: Lvl ${strengthLevel.level} (${strengthLevel.currentXp}/${strengthLevel.nextLevelXp})\n\n`;
+    
+    // Knowledge (single stat)
+    const knowledgeLevel = getLevel(userData.knowledge);
+    statsText += `**Knowledge** - Level ${knowledgeLevel.level} (${knowledgeLevel.currentXp}/${knowledgeLevel.nextLevelXp})\n\n`;
+    
+    // Perception (single stat)
+    const perceptionLevel = getLevel(userData.perception);
+    statsText += `**Perception** - Level ${perceptionLevel.level} (${perceptionLevel.currentXp}/${perceptionLevel.nextLevelXp})\n\n`;
+    
+    // Work (single stat)
+    const workLevel = getLevel(userData.work);
+    statsText += `**Work** - Level ${workLevel.level} (${workLevel.currentXp}/${workLevel.nextLevelXp})\n`;
     
     await interaction.reply({ content: statsText, ephemeral: false });
   }
