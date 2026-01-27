@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 // JSON file storage
-const DATA_FILE = path.join(__dirname, 'data.json');
+const DATA_FILE = '/data/data.json';
 
 // Voice channel tracking
 const voiceSessions = new Map();
