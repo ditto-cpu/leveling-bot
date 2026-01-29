@@ -1,9 +1,27 @@
 const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes } = require('discord.js');
-const fs = require('fs');
-const path = require('path');
 
-// JSON file storage
-const DATA_FILE = '/data/data.json';
+// Supabase setup
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+
+async function supabase(endpoint, options = {}) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${endpoint}`, {
+    headers: {
+      'apikey': SUPABASE_KEY,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json',
+      'Prefer': options.prefer || 'return=representation'
+    },
+    ...options
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    console.error('Supabase error:', text);
+    return null;
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
+}
 
 // Voice channel tracking
 const voiceSessions = new Map();
@@ -11,21 +29,6 @@ const voiceSessions = new Map();
 // Config
 const TRACKED_VOICE_CHANNEL_IDS = ['1460373491776749708', '1462082630353944720'];
 const XP_ANNOUNCEMENT_CHANNEL_ID = '1462682137680412672';
-
-function loadData() {
-  try {
-    if (fs.existsSync(DATA_FILE)) {
-      return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    }
-  } catch (e) {
-    console.log('Creating new data file');
-  }
-  return {};
-}
-
-function saveData(data) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-}
 
 // Level calculation: Level 1 = 100xp, Level 2 = 200xp, etc.
 function getLevel(xp) {
@@ -42,34 +45,55 @@ function getLevel(xp) {
   return { level, currentXp: Math.floor(remaining), nextLevelXp: required };
 }
 
-function getKey(userId, guildId) {
-  return `${guildId}-${userId}`;
-}
-
-function getUserData(data, userId, guildId) {
-  const key = getKey(userId, guildId);
-  if (!data[key]) {
-    data[key] = {
-      // Main stats
+async function getOrCreateUser(discordId, username) {
+  // Try to find existing user
+  let users = await supabase(`users?discord_id=eq.${discordId}&select=*`);
+  
+  if (users && users.length > 0) {
+    return users[0];
+  }
+  
+  // Create new user
+  const newUser = await supabase('users', {
+    method: 'POST',
+    body: JSON.stringify({
+      discord_id: discordId,
+      username: username,
       soma: 0,
       knowledge: 0,
       perception: 0,
-      work: 0,
-      // Soma branches only
-      agility: 0,
-      strength: 0
-    };
-  }
-  return data[key];
+      work: 0
+    })
+  });
+  
+  return newUser ? newUser[0] : null;
 }
 
-function getTotalXp(data, userId, guildId) {
-  const userData = getUserData(data, userId, guildId);
-  return userData.soma + userData.knowledge + userData.perception + userData.work;
+async function updateUserStats(userId, stats) {
+  await supabase(`users?id=eq.${userId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(stats)
+  });
 }
 
-async function updateNickname(member, data) {
-  const totalXp = getTotalXp(data, member.id, member.guild.id);
+async function logActivity(userId, activity, minutes, xpGained) {
+  await supabase('activity_logs', {
+    method: 'POST',
+    body: JSON.stringify({
+      user_id: userId,
+      activity: activity,
+      minutes: minutes,
+      xp_gained: xpGained
+    })
+  });
+}
+
+function getTotalXp(user) {
+  return (user.soma || 0) + (user.knowledge || 0) + (user.perception || 0) + (user.work || 0);
+}
+
+async function updateNickname(member, user) {
+  const totalXp = getTotalXp(user);
   const { level } = getLevel(totalXp);
   
   let baseName = member.displayName.replace(/\s*\[Lvl \d+\]$/, '');
@@ -105,8 +129,7 @@ client.once('ready', async () => {
     new SlashCommandBuilder()
       .setName('log')
       .setDescription('Log your activities (in minutes)')
-      .addIntegerOption(opt => opt.setName('agility').setDescription('Yoga, stretching, running, cardio (1x Soma)'))
-      .addIntegerOption(opt => opt.setName('strength').setDescription('Lifting, calisthenics (1x Soma)'))
+      .addIntegerOption(opt => opt.setName('workout').setDescription('Any physical activity (1x Soma)'))
       .addIntegerOption(opt => opt.setName('video').setDescription('Video/audiobooks (0.7x Knowledge)'))
       .addIntegerOption(opt => opt.setName('reading').setDescription('Reading (1x Knowledge)'))
       .addIntegerOption(opt => opt.setName('writing').setDescription('Writing (1.2x Knowledge)'))
@@ -132,9 +155,9 @@ client.once('ready', async () => {
 
 // Voice channel tracking
 client.on('voiceStateUpdate', async (oldState, newState) => {
-  const userId = newState.id;
+  const discordId = newState.id;
   const guildId = newState.guild.id;
-  const sessionKey = getKey(userId, guildId);
+  const sessionKey = `${guildId}-${discordId}`;
   
   const oldChannel = oldState.channel;
   const newChannel = newState.channel;
@@ -159,17 +182,23 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       voiceSessions.delete(sessionKey);
       
       if (minutes > 0) {
-        // Add XP
-        const data = loadData();
-        const userData = getUserData(data, userId, guildId);
-        userData.work += minutes;
-        saveData(data);
+        // Get or create user
+        const user = await getOrCreateUser(discordId, newState.member.user.username);
+        if (!user) return;
+        
+        // Update stats
+        const newWork = (user.work || 0) + minutes;
+        await updateUserStats(user.id, { work: newWork });
+        await logActivity(user.id, 'work_voice', minutes, minutes);
+        
+        // Update user object for nickname
+        user.work = newWork;
         
         // Update nickname
-        await updateNickname(newState.member, data);
+        await updateNickname(newState.member, user);
         
         // Get new stats
-        const totalXp = getTotalXp(data, userId, guildId);
+        const totalXp = getTotalXp(user);
         const { level, currentXp, nextLevelXp } = getLevel(totalXp);
         
         // Announce in channel
@@ -190,66 +219,68 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  const data = loadData();
-
   if (interaction.commandName === 'log') {
-    const logged = [];
-    const userData = getUserData(data, interaction.user.id, interaction.guildId);
-    
-    // Soma branches
-    const agility = interaction.options.getInteger('agility');
-    if (agility && agility > 0) {
-      userData.agility += agility;
-      userData.soma += agility;
-      logged.push(`Agility: ${agility} min → +${agility} XP (Soma & Agility)`);
+    const user = await getOrCreateUser(interaction.user.id, interaction.user.username);
+    if (!user) {
+      return interaction.reply({ content: 'Database error, try again later.', ephemeral: true });
     }
     
-    const strength = interaction.options.getInteger('strength');
-    if (strength && strength > 0) {
-      userData.strength += strength;
-      userData.soma += strength;
-      logged.push(`Strength: ${strength} min → +${strength} XP (Soma & Strength)`);
+    const logged = [];
+    const updates = {};
+    
+    // Soma (workout)
+    const workout = interaction.options.getInteger('workout');
+    if (workout && workout > 0) {
+      updates.soma = (user.soma || 0) + workout;
+      await logActivity(user.id, 'workout', workout, workout);
+      logged.push(`Workout: ${workout} min → +${workout} XP (Soma)`);
     }
     
     // Knowledge
     const video = interaction.options.getInteger('video');
     if (video && video > 0) {
       const xp = Math.floor(video * 0.7);
-      userData.knowledge += xp;
+      updates.knowledge = (updates.knowledge || user.knowledge || 0) + xp;
+      await logActivity(user.id, 'video', video, xp);
       logged.push(`Video: ${video} min x0.7 → +${xp} XP (Knowledge)`);
     }
     
     const reading = interaction.options.getInteger('reading');
     if (reading && reading > 0) {
-      userData.knowledge += reading;
+      updates.knowledge = (updates.knowledge || user.knowledge || 0) + reading;
+      await logActivity(user.id, 'reading', reading, reading);
       logged.push(`Reading: ${reading} min → +${reading} XP (Knowledge)`);
     }
     
     const writing = interaction.options.getInteger('writing');
     if (writing && writing > 0) {
       const xp = Math.floor(writing * 1.2);
-      userData.knowledge += xp;
+      updates.knowledge = (updates.knowledge || user.knowledge || 0) + xp;
+      await logActivity(user.id, 'writing', writing, xp);
       logged.push(`Writing: ${writing} min x1.2 → +${xp} XP (Knowledge)`);
     }
     
     // Perception
     const meditation = interaction.options.getInteger('meditation');
     if (meditation && meditation > 0) {
-      userData.perception += meditation;
+      updates.perception = (updates.perception || user.perception || 0) + meditation;
+      await logActivity(user.id, 'meditation', meditation, meditation);
       logged.push(`Meditation: ${meditation} min → +${meditation} XP (Perception)`);
     }
     
     const bgMed = interaction.options.getInteger('background_med');
     if (bgMed && bgMed > 0) {
       const xp = Math.floor(bgMed * 0.2);
-      userData.perception += xp;
+      updates.perception = (updates.perception || user.perception || 0) + xp;
+      await logActivity(user.id, 'background_med', bgMed, xp);
       logged.push(`Background Med: ${bgMed} min x0.2 → +${xp} XP (Perception)`);
     }
     
     // Work
     const work = interaction.options.getInteger('work');
     if (work && work > 0) {
-      userData.work += work;
+      updates.work = (user.work || 0) + work;
+      await logActivity(user.id, 'work', work, work);
       logged.push(`Work: ${work} min → +${work} XP (Work)`);
     }
     
@@ -257,11 +288,13 @@ client.on('interactionCreate', async interaction => {
       return interaction.reply({ content: 'Please specify at least one activity with minutes!', ephemeral: true });
     }
     
-    saveData(data);
+    await updateUserStats(user.id, updates);
     
-    await updateNickname(interaction.member, data);
+    // Merge updates for nickname
+    const updatedUser = { ...user, ...updates };
+    await updateNickname(interaction.member, updatedUser);
     
-    const totalXp = getTotalXp(data, interaction.user.id, interaction.guildId);
+    const totalXp = getTotalXp(updatedUser);
     const { level, currentXp, nextLevelXp } = getLevel(totalXp);
     
     await interaction.reply({
@@ -271,33 +304,29 @@ client.on('interactionCreate', async interaction => {
   }
 
   if (interaction.commandName === 'stats') {
-    const targetUser = interaction.options.getUser('user') || interaction.user;
+    const targetDiscordUser = interaction.options.getUser('user') || interaction.user;
     
-    const totalXp = getTotalXp(data, targetUser.id, interaction.guildId);
+    const user = await getOrCreateUser(targetDiscordUser.id, targetDiscordUser.username);
+    if (!user) {
+      return interaction.reply({ content: 'Database error, try again later.', ephemeral: true });
+    }
+    
+    const totalXp = getTotalXp(user);
     const totalLevel = getLevel(totalXp);
-    const userData = getUserData(data, targetUser.id, interaction.guildId);
     
-    let statsText = `**${targetUser.username}'s Stats**\n\n`;
+    let statsText = `**${targetDiscordUser.username}'s Stats**\n\n`;
     statsText += `**Total Level ${totalLevel.level}** (${totalLevel.currentXp}/${totalLevel.nextLevelXp} XP)\n\n`;
     
-    // Soma with branches
-    const somaLevel = getLevel(userData.soma);
-    const agilityLevel = getLevel(userData.agility);
-    const strengthLevel = getLevel(userData.strength);
-    statsText += `**Soma** - Level ${somaLevel.level} (${somaLevel.currentXp}/${somaLevel.nextLevelXp})\n`;
-    statsText += `  Agility: Lvl ${agilityLevel.level} (${agilityLevel.currentXp}/${agilityLevel.nextLevelXp})\n`;
-    statsText += `  Strength: Lvl ${strengthLevel.level} (${strengthLevel.currentXp}/${strengthLevel.nextLevelXp})\n\n`;
+    const somaLevel = getLevel(user.soma || 0);
+    statsText += `**Soma** - Level ${somaLevel.level} (${somaLevel.currentXp}/${somaLevel.nextLevelXp})\n\n`;
     
-    // Knowledge (single stat)
-    const knowledgeLevel = getLevel(userData.knowledge);
+    const knowledgeLevel = getLevel(user.knowledge || 0);
     statsText += `**Knowledge** - Level ${knowledgeLevel.level} (${knowledgeLevel.currentXp}/${knowledgeLevel.nextLevelXp})\n\n`;
     
-    // Perception (single stat)
-    const perceptionLevel = getLevel(userData.perception);
+    const perceptionLevel = getLevel(user.perception || 0);
     statsText += `**Perception** - Level ${perceptionLevel.level} (${perceptionLevel.currentXp}/${perceptionLevel.nextLevelXp})\n\n`;
     
-    // Work (single stat)
-    const workLevel = getLevel(userData.work);
+    const workLevel = getLevel(user.work || 0);
     statsText += `**Work** - Level ${workLevel.level} (${workLevel.currentXp}/${workLevel.nextLevelXp})\n`;
     
     await interaction.reply({ content: statsText, ephemeral: false });
