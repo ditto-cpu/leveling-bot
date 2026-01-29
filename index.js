@@ -32,14 +32,14 @@ const XP_ANNOUNCEMENT_CHANNEL_ID = '1462682137680412672';
 
 // Level calculation: Level 1 = 100xp, Level 2 = 200xp, etc.
 function getLevel(xp) {
-  let level = 0;
+  let level = 1;
   let required = 100;
   let remaining = xp;
   
   while (remaining >= required) {
     remaining -= required;
     level++;
-    required = (level + 1) * 100;
+    required = level * 100;
   }
   
   return { level, currentXp: Math.floor(remaining), nextLevelXp: required };
